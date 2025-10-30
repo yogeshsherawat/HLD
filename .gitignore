@@ -1,2 +1,7 @@
 .env
 .venv
+*.pyc
+*.cpython
+/mini-drive/backend/data/
+*pycache*
+*.log

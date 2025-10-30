@@ -284,11 +284,7 @@ def load_encryption_metadata(upload_id: str) -> dict:
 # ==================== VIRUS SCANNING FUNCTIONS ====================
 
 # Configuration for virus scanning
-QUARANTINE_DIR = "/Users/yogeshwar.sherawat/yogesh/HLD/backend/data/quarantine"
 VIRUS_SCAN_ENABLED = True  # Set to False to disable virus scanning for testing
-
-# Ensure quarantine directory exists
-os.makedirs(QUARANTINE_DIR, exist_ok=True)
 
 # Initialize ClamAV connection
 clamd_client = None
@@ -446,16 +442,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configuration
-UPLOAD_DIR = "/Users/yogeshwar.sherawat/yogesh/HLD/backend/data/uploads"
-MERGED_DIR = "/Users/yogeshwar.sherawat/yogesh/HLD/backend/data/merged"
-KEYS_DIR = "/Users/yogeshwar.sherawat/yogesh/HLD/backend/data/keys"
+# Configuration - Use relative paths based on current file location
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
+MERGED_DIR = os.path.join(DATA_DIR, "merged")
+KEYS_DIR = os.path.join(DATA_DIR, "keys")
+QUARANTINE_DIR = os.path.join(DATA_DIR, "quarantine")
 CHUNK_SIZE = 1024 * 1024  # 1MB
 
 # Ensure directories exist
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(MERGED_DIR, exist_ok=True)
 os.makedirs(KEYS_DIR, exist_ok=True)
+os.makedirs(QUARANTINE_DIR, exist_ok=True)
 
 # Generate or load RSA key pair
 PRIVATE_KEY_PATH = os.path.join(KEYS_DIR, "private_key.pem")
@@ -568,6 +568,8 @@ def init_upload(filename: str = Form(...)):
             "final_scan_result": None,  # Final file scan result
             "is_infected": False,  # Overall infection status
         }
+        
+        print(f"Upload session initialized: {upload_sessions}")
 
         return JSONResponse(
             {
@@ -1048,7 +1050,6 @@ def download_file(upload_id: str):
         )
 
         # Return decrypted file data
-        
 
         return Response(
             content=decrypted_data,
@@ -1218,6 +1219,8 @@ async def startup_event():
         print("   2. Update virus definitions: freshclam")
         print("   3. Start daemon: clamd")
 
+    print(f"📁 Base directory: {BASE_DIR}")
+    print(f"📁 Data directory: {DATA_DIR}")
     print(f"📁 Upload directory: {UPLOAD_DIR}")
     print(f"📁 Merged files directory: {MERGED_DIR}")
     print(f"🔒 Quarantine directory: {QUARANTINE_DIR}")
