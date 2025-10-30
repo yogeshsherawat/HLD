@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Encryption Debug</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .log { background: #f0f0f0; padding: 10px; margin: 10px 0; border-radius: 5px; }
+        .error { background: #ffebee; color: #c62828; }
+        .success { background: #e8f5e8; color: #2e7d32; }
+        button { padding: 10px 20px; margin: 5px; }
+    </style>
+</head>
+<body>
+    <h1>🔐 Encryption Debug Tool</h1>
+    
+    <button onclick="testServerConnection()">1. Test Server Connection</button>
+    <button onclick="testPublicKeyFetch()">2. Test Public Key Fetch</button>
+    <button onclick="testKeyImport()">3. Test Key Import</button>
+    <button onclick="testEncryption()">4. Test Encryption</button>
+    <button onclick="clearLogs()">Clear Logs</button>
+    
+    <div id="logs"></div>
+
+    <script>
+        const API_BASE_URL = 'http://localhost:8000';
+        let serverPublicKey = null;
+        
+        function log(message, type = 'info') {
+            const logs = document.getElementById('logs');
+            const div = document.createElement('div');
+            div.className = `log ${type}`;
+            div.innerHTML = `<strong>${new Date().toLocaleTimeString()}</strong>: ${message}`;
+            logs.appendChild(div);
+            console.log(message);
+        }
+        
+        function clearLogs() {
+            document.getElementById('logs').innerHTML = '';
+        }
+        
+        async function testServerConnection() {
+            try {
+                log('🔄 Testing server connection...', 'info');
+                const response = await fetch(`${API_BASE_URL}/health`);
+                if (response.ok) {
+                    const data = await response.json();
+                    log(`✅ Server is running: ${JSON.stringify(data)}`, 'success');
+                } else {
+                    log(`❌ Server error: ${response.status} ${response.statusText}`, 'error');
+                }
+            } catch (error) {
+                log(`❌ Connection failed: ${error.message}`, 'error');
+            }
+        }
+        
+        async function testPublicKeyFetch() {
+            try {
+                log('🔄 Fetching public key...', 'info');
+                const response = await fetch(`${API_BASE_URL}/public-key`);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                const keyData = await response.json();
+                log(`✅ Public key received: ${keyData.algorithm}-${keyData.key_size}`, 'success');
+                log(`📝 Key length: ${keyData.public_key.length} characters`, 'info');
+                
+                // Test base64 decoding
+                const pemKey = atob(keyData.public_key);
+                log(`📝 Decoded PEM length: ${pemKey.length} bytes`, 'info');
+                log(`📝 PEM header: ${pemKey.substring(0, 50)}...`, 'info');
+                
+                return keyData;
+            } catch (error) {
+                log(`❌ Public key fetch failed: ${error.message}`, 'error');
+                return null;
+            }
+        }
+        
+        async function testKeyImport() {
+            try {
+                log('🔄 Testing key import...', 'info');
+                
+                const keyData = await testPublicKeyFetch();
+                if (!keyData) return;
+                
+                // Convert base64 PEM to ArrayBuffer
+                const pemKey = atob(keyData.public_key);
+                log(`📝 Raw PEM preview: ${pemKey.substring(0, 100)}...`, 'info');
+                
+                // Extract the base64 content between the PEM headers
+                const pemLines = pemKey.split('\n');
+                const base64Lines = pemLines.filter(line => 
+                    !line.includes('-----BEGIN') && 
+                    !line.includes('-----END') && 
+                    line.trim().length > 0
+                );
+                const base64Content = base64Lines.join('');
+                log(`📝 Extracted base64 content length: ${base64Content.length}`, 'info');
+                
+                // Convert base64 to binary
+                const binaryString = atob(base64Content);
+                const binaryKey = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                    binaryKey[i] = binaryString.charCodeAt(i);
+                }
+                
+                log(`📝 Binary key buffer size: ${binaryKey.buffer.byteLength} bytes`, 'info');
+                
+                // Import the public key for encryption
+                serverPublicKey = await window.crypto.subtle.importKey(
+                    'spki',
+                    binaryKey.buffer,
+                    {
+                        name: 'RSA-OAEP',
+                        hash: 'SHA-256'
+                    },
+                    false,
+                    ['encrypt']
+                );
+                
+                log(`✅ Public key imported successfully!`, 'success');
+                log(`📝 Key type: ${serverPublicKey.type}`, 'info');
+                log(`📝 Key algorithm: ${serverPublicKey.algorithm.name}`, 'info');
+                
+            } catch (error) {
+                log(`❌ Key import failed: ${error.message}`, 'error');
+                log(`📝 Error type: ${error.name}`, 'error');
+                
+                if (error.name === 'DataError') {
+                    log('💡 This usually means the key format is invalid', 'error');
+                } else if (error.name === 'NotSupportedError') {
+                    log('💡 Browser does not support RSA-OAEP', 'error');
+                }
+            }
+        }
+        
+        async function testEncryption() {
+            try {
+                if (!serverPublicKey) {
+                    log('⚠️ No public key loaded - running key import first...', 'info');
+                    await testKeyImport();
+                    if (!serverPublicKey) {
+                        log('❌ Cannot test encryption without public key', 'error');
+                        return;
+                    }
+                }
+                
+                log('🔄 Testing encryption...', 'info');
+                
+                // Test with small data (should work)
+                const testData = new TextEncoder().encode('Hello, World!');
+                log(`📝 Test data size: ${testData.byteLength} bytes`, 'info');
+                
+                const encryptedData = await window.crypto.subtle.encrypt(
+                    {
+                        name: 'RSA-OAEP'
+                    },
+                    serverPublicKey,
+                    testData
+                );
+                
+                log(`✅ Encryption successful!`, 'success');
+                log(`📝 Encrypted data size: ${encryptedData.byteLength} bytes`, 'info');
+                
+                // Test with larger data (should fail gracefully)
+                const largeData = new Uint8Array(1000).fill(65); // 1KB of 'A's
+                log(`📝 Testing with large data: ${largeData.byteLength} bytes`, 'info');
+                
+                try {
+                    await window.crypto.subtle.encrypt(
+                        {
+                            name: 'RSA-OAEP'
+                        },
+                        serverPublicKey,
+                        largeData
+                    );
+                    log(`✅ Large data encryption successful (unexpected!)`, 'success');
+                } catch (largeError) {
+                    log(`⚠️ Large data encryption failed (expected): ${largeError.message}`, 'info');
+                }
+                
+            } catch (error) {
+                log(`❌ Encryption test failed: ${error.message}`, 'error');
+            }
+        }
+        
+        // Auto-run basic tests on page load
+        window.addEventListener('load', async () => {
+            log('🚀 Debug tool loaded', 'info');
+            await testServerConnection();
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chunked File Upload</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        .upload-section {
+            margin-bottom: 30px;
+        }
+        
+        .file-input-wrapper {
+            position: relative;
+            display: inline-block;
+            margin-bottom: 20px;
+        }
+        
+        #fileInput {
+            padding: 10px;
+            border: 2px dashed #ddd;
+            border-radius: 5px;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        
+        #uploadBtn {
+            background-color: #007bff;
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-right: 10px;
+        }
+        
+        #uploadBtn:hover {
+            background-color: #0056b3;
+        }
+        
+        #uploadBtn:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+        
+        .progress-section {
+            margin-top: 20px;
+        }
+        
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background-color: #e9ecef;
+            border-radius: 10px;
+            overflow: hidden;
+            margin-bottom: 10px;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background-color: #28a745;
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+        
+        .status {
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 10px;
+        }
+        
+        .status.info {
+            background-color: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        
+        .status.success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        
+        .status.error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        
+        .file-info {
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        
+        .chunk-info {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 10px;
+        }
+        
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Chunked File Upload System</h1>
+        <p style="text-align: center; color: #666; margin-bottom: 30px;">
+            <strong>Supported file types:</strong> DMG Disk Images (.dmg) only
+        </p>
+        
+        <div class="upload-section">
+            <div class="file-input-wrapper">
+                <input type="file" id="fileInput" accept=".dmg">
+            </div>
+            
+            <div id="fileInfo" class="file-info hidden">
+                <h3>File Information</h3>
+                <div><strong>Name:</strong> <span id="fileName"></span></div>
+                <div><strong>Size:</strong> <span id="fileSize"></span></div>
+                <div><strong>Type:</strong> <span id="fileType"></span></div>
+                <div><strong>Chunks:</strong> <span id="totalChunks"></span></div>
+                <div><strong>Chunk Size:</strong> 1 MB</div>
+            </div>
+            
+            <button id="uploadBtn" type="button" onclick="startUpload()">Upload File</button>
+            <button id="clearBtn" type="button" onclick="clearUpload()" style="background-color: #6c757d; color: white; padding: 12px 24px; border: none; border-radius: 5px; cursor: pointer;">Clear</button>
+        </div>
+        
+        <div id="progressSection" class="progress-section hidden">
+            <h3>Upload Progress</h3>
+            <div class="progress-bar">
+                <div id="progressFill" class="progress-fill"></div>
+            </div>
+            <div class="chunk-info">
+                <span>Chunks: <span id="chunksUploaded">0</span> / <span id="chunksTotal">0</span></span>
+                <span id="progressPercent">0%</span>
+            </div>
+        </div>
+        
+        <div id="statusMessages"></div>
+    </div>
+
+    <script>
+        // Configuration
+        const API_BASE_URL = 'http://localhost:8000';
+        const CHUNK_SIZE = 1024 * 1024; // 1MB
+        
+        // Global variables
+        let selectedFile = null;
+        let uploadId = null;
+        let totalChunks = 0;
+        let chunksUploaded = 0;
+        let serverPublicKey = null;
+        
+        // DOM elements
+        const fileInput = document.getElementById('fileInput');
+        const uploadBtn = document.getElementById('uploadBtn');
+        const fileInfo = document.getElementById('fileInfo');
+        const progressSection = document.getElementById('progressSection');
+        const statusMessages = document.getElementById('statusMessages');
+        
+        // File input change handler
+        fileInput.addEventListener('change', function(event) {
+            const file = event.target.files[0];
+            if (file) {
+                // Validate file type on client side
+                const fileName = file.name.toLowerCase();
+                const isValidType = fileName.endsWith('.dmg');
+                
+                if (!isValidType) {
+                    showStatus('❌ Invalid file type. Only DMG files are allowed.', 'error');
+                    fileInput.value = ''; // Clear the input
+                    clearUpload();
+                    return;
+                }
+                
+                selectedFile = file;
+                displayFileInfo(file);
+                uploadBtn.disabled = false;
+                showStatus('✅ Valid DMG file detected', 'success');
+            } else {
+                clearUpload();
+            }
+        });
+        
+        function displayFileInfo(file) {
+            totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+            
+            document.getElementById('fileName').textContent = file.name;
+            document.getElementById('fileSize').textContent = formatFileSize(file.size);
+            document.getElementById('fileType').textContent = 'DMG Disk Image';
+            document.getElementById('totalChunks').textContent = totalChunks;
+            
+            fileInfo.classList.remove('hidden');
+        }
+        
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+        
+        function showStatus(message, type = 'info') {
+            const statusDiv = document.createElement('div');
+            statusDiv.className = `status ${type}`;
+            statusDiv.textContent = message;
+            statusMessages.appendChild(statusDiv);
+            
+            // Auto-remove info messages after 5 seconds
+            if (type === 'info') {
+                setTimeout(() => {
+                    if (statusDiv.parentNode) {
+                        statusDiv.parentNode.removeChild(statusDiv);
+                    }
+                }, 5000);
+            }
+        }
+        
+        function updateProgress() {
+            const percent = totalChunks > 0 ? Math.round((chunksUploaded / totalChunks) * 100) : 0;
+            
+            document.getElementById('progressFill').style.width = percent + '%';
+            document.getElementById('chunksUploaded').textContent = chunksUploaded;
+            document.getElementById('chunksTotal').textContent = totalChunks;
+            document.getElementById('progressPercent').textContent = percent + '%';
+        }
+        
+        function clearUpload() {
+            selectedFile = null;
+            uploadId = null;
+            totalChunks = 0;
+            chunksUploaded = 0;
+            
+            fileInput.value = '';
+            uploadBtn.disabled = true;
+            fileInfo.classList.add('hidden');
+            progressSection.classList.add('hidden');
+            statusMessages.innerHTML = '';
+            
+            updateProgress();
+        }
+        
+        async function startUpload() {
+            if (!selectedFile) {
+                showStatus('Please select a file first', 'error');
+                return;
+            }
+            
+            try {
+                uploadBtn.disabled = true;
+                progressSection.classList.remove('hidden');
+                chunksUploaded = 0;
+                updateProgress();
+                
+                // Check if encryption is available
+                if (!serverPublicKey) {
+                    showStatus('⚠️ Encryption not available - attempting to reload key...', 'info');
+                    const keyLoaded = await fetchPublicKey();
+                    if (!keyLoaded) {
+                        showStatus('⚠️ Proceeding without encryption (fallback mode)', 'info');
+                    }
+                }
+                
+                showStatus('Initializing upload session...', 'info');
+                
+                // Initialize upload session
+                const initResponse = await initializeUpload(selectedFile.name);
+                uploadId = initResponse.upload_id;
+                
+                showStatus(`Upload session created: ${uploadId}`, 'info');
+                
+                // Upload chunks sequentially
+                for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+                    const start = chunkIndex * CHUNK_SIZE;
+                    const end = Math.min(selectedFile.size, start + CHUNK_SIZE);
+                    const chunk = selectedFile.slice(start, end);
+                    
+                    showStatus(`Encrypting and uploading chunk ${chunkIndex + 1} of ${totalChunks}...`, 'info');
+                    
+                    // Encrypt chunk before upload
+                    const encryptedChunk = await encryptChunk(chunk);
+                    
+                    await uploadChunk(uploadId, chunkIndex, totalChunks, encryptedChunk);
+                    chunksUploaded++;
+                    updateProgress();
+                }
+                
+                // All chunks uploaded - show completion button instead of auto-completing
+                showStatus('✅ All chunks uploaded successfully!', 'success');
+                showCompleteButton();
+                
+            } catch (error) {
+                showStatus(`❌ Upload failed: ${error.message}`, 'error');
+                uploadBtn.disabled = false;
+            }
+        }
+        
+        async function initializeUpload(filename) {
+            const formData = new FormData();
+            formData.append('filename', filename);
+            
+            const response = await fetch(`${API_BASE_URL}/upload/init`, {
+                method: 'POST',
+                body: formData
+            });
+            
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.detail || 'Failed to initialize upload');
+            }
+            
+            return await response.json();
+        }
+        
+        async function uploadChunk(uploadId, chunkIndex, totalChunks, chunkBlob) {
+            const formData = new FormData();
+            formData.append('upload_id', uploadId);
+            formData.append('chunk_index', chunkIndex.toString());
+            formData.append('total_chunks', totalChunks.toString());
+            formData.append('file', chunkBlob, `chunk_${chunkIndex}`);
+            
+            const response = await fetch(`${API_BASE_URL}/upload/chunk`, {
+                method: 'POST',
+                body: formData
+            });
+            
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.detail || `Failed to upload chunk ${chunkIndex}`);
+            }
+            
+            return await response.json();
+        }
+        
+        async function completeUpload(uploadId) {
+            const formData = new FormData();
+            formData.append('upload_id', uploadId);
+            
+            const response = await fetch(`${API_BASE_URL}/upload/complete`, {
+                method: 'POST',
+                body: formData
+            });
+            
+            if (!response.ok) {
+                const error = await response.json();
+                
+                // Check if error detail is an object (contains missing_chunks info)
+                if (typeof error.detail === 'object' && error.detail.missing_chunks) {
+                    const errorObj = new Error(error.detail.message || 'Failed to complete upload');
+                    errorObj.missing_chunks = error.detail.missing_chunks;
+                    errorObj.chunks_received = error.detail.chunks_received;
+                    errorObj.total_chunks = error.detail.total_chunks;
+                    throw errorObj;
+                } else {
+                    throw new Error(error.detail || 'Failed to complete upload');
+                }
+            }
+            
+            return await response.json();
+        }
+        
+        function showCompleteButton() {
+            // Create a completion button after all chunks are uploaded
+            const completeDiv = document.createElement('div');
+            completeDiv.className = 'status info';
+            completeDiv.style.textAlign = 'center';
+            completeDiv.style.marginTop = '20px';
+            completeDiv.innerHTML = `
+                <p style="margin-bottom: 15px;"><strong>📦 Ready to merge chunks into final file</strong></p>
+                <button type="button" onclick="manualCompleteUpload(); return false;" style="
+                    background-color: #007bff;
+                    color: white;
+                    padding: 12px 24px;
+                    border: none;
+                    border-radius: 5px;
+                    cursor: pointer;
+                    font-size: 16px;
+                    font-weight: bold;
+                    margin-right: 10px;
+                ">Complete Upload</button>
+                <button type="button" onclick="checkUploadStatus(); return false;" style="
+                    background-color: #17a2b8;
+                    color: white;
+                    padding: 12px 24px;
+                    border: none;
+                    border-radius: 5px;
+                    cursor: pointer;
+                    font-size: 16px;
+                    margin-right: 10px;
+                ">Check Status</button>
+                <button type="button" onclick="resetForNewUpload(); return false;" style="
+                    background-color: #6c757d;
+                    color: white;
+                    padding: 12px 24px;
+                    border: none;
+                    border-radius: 5px;
+                    cursor: pointer;
+                    font-size: 16px;
+                ">Cancel & Reset</button>
+            `;
+            statusMessages.appendChild(completeDiv);
+            
+            // Hide the original upload button
+            uploadBtn.style.display = 'none';
+        }
+        
+        async function manualCompleteUpload() {
+            try {
+                showStatus('🔄 Merging chunks into final file...', 'info');
+                
+                // Complete the upload
+                const completeResponse = await completeUpload(uploadId);
+                
+                showStatus(`✅ Upload completed successfully! File: ${completeResponse.filename} (${formatFileSize(completeResponse.file_size)})`, 'success');
+                
+                // Show reset button after successful completion
+                showResetButton();
+                
+            } catch (error) {
+                // Check if error contains missing chunks information
+                if (error.missing_chunks && error.missing_chunks.length > 0) {
+                    showStatus(`❌ Cannot complete: ${error.missing_chunks.length} chunk(s) missing!`, 'error');
+                    showRetryButton(error.missing_chunks);
+                } else {
+                    showStatus(`❌ Upload completion failed: ${error.message}`, 'error');
+                }
+            }
+        }
+        
+        function showResetButton() {
+            // Create a prominent reset button after successful upload
+            const resetDiv = document.createElement('div');
+            resetDiv.className = 'status success';
+            resetDiv.style.textAlign = 'center';
+            resetDiv.style.marginTop = '20px';
+            resetDiv.innerHTML = `
+                <p style="margin-bottom: 15px;"><strong>🎉 Upload Complete!</strong></p>
+                <button type="button" onclick="resetForNewUpload(); return false;" style="
+                    background-color: #28a745;
+                    color: white;
+                    padding: 12px 24px;
+                    border: none;
+                    border-radius: 5px;
+                    cursor: pointer;
+                    font-size: 16px;
+                    font-weight: bold;
+                ">Upload Another File</button>
+            `;
+            statusMessages.appendChild(resetDiv);
+            
+            // Hide the original upload button
+            uploadBtn.style.display = 'none';
+        }
+        
+        async function checkUploadStatus() {
+            try {
+                showStatus('🔍 Checking upload status...', 'info');
+                
+                const response = await fetch(`${API_BASE_URL}/upload/status/${uploadId}`);
+                
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Failed to get upload status');
+                }
+                
+                const status = await response.json();
+                
+                let statusMessage = `📊 Upload Status:
+                • File: ${status.filename}
+                • Chunks received: ${status.chunks_received}/${status.total_chunks}
+                • Complete: ${status.is_complete ? 'Yes ✅' : 'No ❌'}`;
+                
+                if (status.file_type_validated && status.detected_file_type) {
+                    statusMessage += `\n• File type: DMG ✅`;
+                } else if (status.file_type_validated === false) {
+                    statusMessage += `\n• File type: Not validated yet ⏳`;
+                }
+                
+                if (status.missing_chunks && status.missing_chunks.length > 0) {
+                    statusMessage += `\n• Missing chunks: [${status.missing_chunks.join(', ')}]`;
+                    showStatus(statusMessage, 'error');
+                    showRetryButton(status.missing_chunks);
+                } else {
+                    showStatus(statusMessage, status.is_complete ? 'success' : 'info');
+                }
+                
+            } catch (error) {
+                showStatus(`❌ Status check failed: ${error.message}`, 'error');
+            }
+        }
+        
+        function showRetryButton(missingChunks) {
+            // Create a retry button for missing chunks
+            const retryDiv = document.createElement('div');
+            retryDiv.className = 'status error';
+            retryDiv.style.textAlign = 'center';
+            retryDiv.style.marginTop = '20px';
+            retryDiv.innerHTML = `
+                <p style="margin-bottom: 15px;"><strong>⚠️ ${missingChunks.length} chunk(s) missing!</strong></p>
+                <button type="button" onclick="retryMissingChunks(${JSON.stringify(missingChunks)}); return false;" style="
+                    background-color: #ffc107;
+                    color: #000;
+                    padding: 12px 24px;
+                    border: none;
+                    border-radius: 5px;
+                    cursor: pointer;
+                    font-size: 16px;
+                    font-weight: bold;
+                    margin-right: 10px;
+                ">Retry Missing Chunks</button>
+            `;
+            statusMessages.appendChild(retryDiv);
+        }
+        
+        async function retryMissingChunks(missingChunks) {
+            try {
+                showStatus(`🔄 Retrying ${missingChunks.length} missing chunk(s)...`, 'info');
+                
+                let successCount = 0;
+                let failedChunks = [];
+                
+                for (const chunkIndex of missingChunks) {
+                    try {
+                        const start = chunkIndex * CHUNK_SIZE;
+                        const end = Math.min(selectedFile.size, start + CHUNK_SIZE);
+                        const chunk = selectedFile.slice(start, end);
+                        
+                        showStatus(`Encrypting and re-uploading chunk ${chunkIndex}...`, 'info');
+                        
+                        // Encrypt chunk before retry upload
+                        const encryptedChunk = await encryptChunk(chunk);
+                        
+                        await uploadChunk(uploadId, chunkIndex, totalChunks, encryptedChunk);
+                        successCount++;
+                        chunksUploaded++;
+                        updateProgress();
+                        
+                    } catch (error) {
+                        failedChunks.push(chunkIndex);
+                        showStatus(`❌ Failed to retry chunk ${chunkIndex}: ${error.message}`, 'error');
+                    }
+                }
+                
+                if (failedChunks.length === 0) {
+                    showStatus(`✅ Successfully re-uploaded all ${successCount} missing chunk(s)!`, 'success');
+                } else {
+                    showStatus(`⚠️ Re-uploaded ${successCount} chunk(s), but ${failedChunks.length} still failed: [${failedChunks.join(', ')}]`, 'error');
+                }
+                
+            } catch (error) {
+                showStatus(`❌ Retry failed: ${error.message}`, 'error');
+            }
+        }
+        
+        async function fetchPublicKey() {
+            try {
+                showStatus('🔄 Fetching public key from server...', 'info');
+                
+                const response = await fetch(`${API_BASE_URL}/public-key`);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                const keyData = await response.json();
+                
+                console.log('Received key data:', keyData);
+                
+                // Convert base64 PEM to ArrayBuffer
+                const pemKey = atob(keyData.public_key);
+                console.log('Decoded PEM length:', pemKey.length);
+                console.log('PEM content preview:', pemKey.substring(0, 100));
+                
+                // Extract the base64 content between the PEM headers
+                const pemLines = pemKey.split('\n');
+                const base64Lines = pemLines.filter(line => 
+                    !line.includes('-----BEGIN') && 
+                    !line.includes('-----END') && 
+                    line.trim().length > 0
+                );
+                const base64Content = base64Lines.join('');
+                console.log('Extracted base64 content length:', base64Content.length);
+                
+                // Convert base64 to binary
+                const binaryString = atob(base64Content);
+                const binaryKey = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                    binaryKey[i] = binaryString.charCodeAt(i);
+                }
+                
+                console.log('Final binary key buffer size:', binaryKey.buffer.byteLength);
+                
+                // Import the public key for encryption
+                serverPublicKey = await window.crypto.subtle.importKey(
+                    'spki',
+                    binaryKey.buffer,
+                    {
+                        name: 'RSA-OAEP',
+                        hash: 'SHA-256'
+                    },
+                    false,
+                    ['encrypt']
+                );
+                
+                console.log('Public key imported successfully:', serverPublicKey);
+                showStatus('🔑 Public key loaded for encryption', 'success');
+                return true;
+            } catch (error) {
+                console.error('Key loading error:', error);
+                showStatus(`❌ Failed to load encryption key: ${error.message}`, 'error');
+                
+                // Show more detailed error information
+                if (error.name === 'DataError') {
+                    showStatus('💡 Key format issue - check server key generation', 'error');
+                } else if (error.name === 'NotSupportedError') {
+                    showStatus('💡 Browser does not support RSA-OAEP encryption', 'error');
+                }
+                
+                return false;
+            }
+        }
+        
+        async function encryptChunk(chunkData) {
+            // If no public key available, return original chunk (fallback mode)
+            if (!serverPublicKey) {
+                console.log('No public key available - using fallback mode');
+                return chunkData;
+            }
+            
+            try {
+                // Convert chunk to ArrayBuffer
+                const chunkBuffer = await chunkData.arrayBuffer();
+                
+                // RSA-OAEP can only encrypt small amounts of data
+                // For large chunks, we need to use hybrid encryption
+                // For now, let's use a simpler approach with smaller chunks
+                const maxEncryptSize = 190; // RSA-2048 can encrypt ~190 bytes with OAEP padding
+                
+                if (chunkBuffer.byteLength > maxEncryptSize) {
+                    // For demo purposes, let's just encrypt the first 190 bytes
+                    // In production, you'd use AES + RSA hybrid encryption
+                    const smallChunk = chunkBuffer.slice(0, maxEncryptSize);
+                    const encryptedData = await window.crypto.subtle.encrypt(
+                        {
+                            name: 'RSA-OAEP'
+                        },
+                        serverPublicKey,
+                        smallChunk
+                    );
+                    
+                    // Return encrypted small chunk + remaining unencrypted data
+                    // This is just for demonstration - not secure for production!
+                    const remaining = chunkBuffer.slice(maxEncryptSize);
+                    const combined = new Uint8Array(encryptedData.byteLength + remaining.byteLength);
+                    combined.set(new Uint8Array(encryptedData), 0);
+                    combined.set(new Uint8Array(remaining), encryptedData.byteLength);
+                    
+                    console.log(`Encrypted first ${maxEncryptSize} bytes of ${chunkBuffer.byteLength} byte chunk`);
+                    return new Blob([combined]);
+                } else {
+                    // Small chunk - encrypt entirely
+                    const encryptedData = await window.crypto.subtle.encrypt(
+                        {
+                            name: 'RSA-OAEP'
+                        },
+                        serverPublicKey,
+                        chunkBuffer
+                    );
+                    
+                    console.log(`Fully encrypted ${chunkBuffer.byteLength} byte chunk`);
+                    return new Blob([encryptedData]);
+                }
+            } catch (error) {
+                console.error('Encryption failed:', error);
+                console.log('Falling back to unencrypted upload');
+                // Fallback: return original chunk (for backward compatibility)
+                return chunkData;
+            }
+        }
+        
+        function resetForNewUpload() {
+            clearUpload();
+            uploadBtn.style.display = 'inline-block';
+        }
+        
+        // Load public key when page loads
+        window.addEventListener('load', async () => {
+            await fetchPublicKey();
+        });
+    </script>
+</body>
+</html>

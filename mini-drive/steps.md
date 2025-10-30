@@ -1,0 +1,10 @@
+- Step 1
+  - Created Resumable Uploads with 1 MB Chunks
+- Step 2
+  - If some chunk failed, then added retry logic for that chunk
+- Step 3
+  - Added public/private encryption for the chunks that are in transit (being uploaded)
+  - This is not needed if we are doing HTTPS
+- Step 4
+  - Added magic numbers or headers check in case malicious user disguise abc.exe as abc.pdf
+- 
