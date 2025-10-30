@@ -130,12 +130,12 @@
     <div class="container">
         <h1>🚀 Chunked File Upload System</h1>
         <p style="text-align: center; color: #666; margin-bottom: 30px;">
-            <strong>Supported file types:</strong> DMG Disk Images (.dmg) only
+            <strong>Supported file types:</strong> DMG Disk Images (.dmg) and Text Files (.txt, .log, .md, .csv, .json, .xml, .yaml, .yml)
         </p>
         
         <div class="upload-section">
             <div class="file-input-wrapper">
-                <input type="file" id="fileInput" accept=".dmg">
+                <input type="file" id="fileInput" accept=".dmg,.txt,.log,.md,.csv,.json,.xml,.yaml,.yml">
             </div>
             
             <div id="fileInfo" class="file-info hidden">
@@ -190,10 +190,11 @@
             if (file) {
                 // Validate file type on client side
                 const fileName = file.name.toLowerCase();
-                const isValidType = fileName.endsWith('.dmg');
+                const supportedExtensions = ['.dmg', '.txt', '.log', '.md', '.csv', '.json', '.xml', '.yaml', '.yml'];
+                const isValidType = supportedExtensions.some(ext => fileName.endsWith(ext));
                 
                 if (!isValidType) {
-                    showStatus('❌ Invalid file type. Only DMG files are allowed.', 'error');
+                    showStatus('❌ Invalid file type. Only DMG and text files (.txt, .log, .md, .csv, .json, .xml, .yaml, .yml) are allowed.', 'error');
                     fileInput.value = ''; // Clear the input
                     clearUpload();
                     return;
@@ -202,7 +203,13 @@
                 selectedFile = file;
                 displayFileInfo(file);
                 uploadBtn.disabled = false;
-                showStatus('✅ Valid DMG file detected', 'success');
+                
+                // Show appropriate success message based on file type
+                if (fileName.endsWith('.dmg')) {
+                    showStatus('✅ Valid DMG file detected', 'success');
+                } else {
+                    showStatus('✅ Valid text file detected', 'success');
+                }
             } else {
                 clearUpload();
             }
@@ -211,9 +218,31 @@
         function displayFileInfo(file) {
             totalChunks = Math.ceil(file.size / CHUNK_SIZE);
             
+            // Determine file type for display
+            const fileName = file.name.toLowerCase();
+            let fileTypeDisplay = 'Unknown';
+            
+            if (fileName.endsWith('.dmg')) {
+                fileTypeDisplay = 'DMG Disk Image';
+            } else if (fileName.endsWith('.txt')) {
+                fileTypeDisplay = 'Text File';
+            } else if (fileName.endsWith('.log')) {
+                fileTypeDisplay = 'Log File';
+            } else if (fileName.endsWith('.md')) {
+                fileTypeDisplay = 'Markdown File';
+            } else if (fileName.endsWith('.csv')) {
+                fileTypeDisplay = 'CSV File';
+            } else if (fileName.endsWith('.json')) {
+                fileTypeDisplay = 'JSON File';
+            } else if (fileName.endsWith('.xml')) {
+                fileTypeDisplay = 'XML File';
+            } else if (fileName.endsWith('.yaml') || fileName.endsWith('.yml')) {
+                fileTypeDisplay = 'YAML File';
+            }
+            
             document.getElementById('fileName').textContent = file.name;
             document.getElementById('fileSize').textContent = formatFileSize(file.size);
-            document.getElementById('fileType').textContent = 'DMG Disk Image';
+            document.getElementById('fileType').textContent = fileTypeDisplay;
             document.getElementById('totalChunks').textContent = totalChunks;
             
             fileInfo.classList.remove('hidden');

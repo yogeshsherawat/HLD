@@ -64,20 +64,29 @@ Simply open `frontend/index.html` in your web browser. The frontend will connect
 
 ## 🧪 Testing Different Scenarios
 
+### Supported File Types
+- **DMG Files**: Apple Disk Images (.dmg)
+- **Text Files**: Various text formats (.txt, .log, .md, .csv, .json, .xml, .yaml, .yml)
+
 ### Small Files (< 1MB)
 - Single chunk upload
 - Immediate completion
+- Works with both DMG and text files
 
 ### Large Files (> 1MB)
 - Multiple chunks (1MB each)
 - Sequential upload with progress tracking
 - Automatic merging
+- Full encryption and virus scanning
 
 ### Edge Cases to Test
 - Very large files (100MB+)
 - Files with special characters in names
 - Duplicate filename handling
 - Network interruption simulation
+- Mixed text encodings (UTF-8, ASCII, Latin-1)
+- Empty files
+- Files with virus signatures (for testing quarantine)
 
 ## 🎯 Key Features Implemented
 
@@ -89,6 +98,11 @@ Simply open `frontend/index.html` in your web browser. The frontend will connect
 ✅ **Error Handling**: Basic error responses and user feedback  
 ✅ **Duplicate Handling**: Automatic filename conflict resolution  
 ✅ **Cleanup**: Automatic temporary file cleanup after merge  
+✅ **Multi-Format Support**: DMG disk images and various text file formats  
+✅ **Content Detection**: Smart file type detection using magic bytes and heuristics  
+✅ **Encryption at Rest**: AES-256-GCM encryption for stored files  
+✅ **Virus Scanning**: ClamAV integration for malware detection  
+✅ **Quarantine System**: Automatic isolation of infected files  
 
 ## 🔮 Future Extensions
 

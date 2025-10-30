@@ -29,3 +29,10 @@
     - Added /quarantine endpoint to list quarantined files
     - Added /virus-scan/health endpoint to check ClamAV daemon status
     - Virus scan results are stored with encryption metadata
+- Step 7 : Text File Support
+  - ✅ COMPLETED: Added support for text files alongside DMG files
+    - Enhanced magic byte detection with content-based text file detection
+    - Supports multiple text formats: .txt, .log, .md, .csv, .json, .xml, .yaml, .yml
+    - Uses heuristic analysis to distinguish text from binary files
+    - Updated frontend to accept and validate text file uploads
+    - Maintains all existing security features (encryption, virus scanning) for text files

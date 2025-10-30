@@ -15,7 +15,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 # Magic byte signatures for supported file types
 MAGIC_BYTES = {
@@ -34,6 +34,10 @@ MAGIC_BYTES = {
         b"BZh",  # bzip2 compressed DMG
         b"\x1f\x8b",  # gzip compressed DMG
     ],
+    "txt": [
+        # Text files don't have specific magic bytes, but we can check for common patterns
+        # We'll use content-based detection for text files
+    ],
 }
 
 
@@ -47,7 +51,76 @@ def detect_file_type_from_magic_bytes(file_data: bytes) -> str:
         if file_data.startswith(signature):
             return "dmg"
 
+    # Check for text files - use content-based detection
+    if is_text_file(file_data):
+        return "txt"
+
     return None
+
+
+def is_text_file(file_data: bytes, sample_size: int = 1024) -> bool:
+    """
+    Determine if file data represents a text file by analyzing content.
+    Uses heuristics to detect text vs binary content.
+    """
+    if not file_data:
+        return True  # Empty file can be considered text
+
+    # Take a sample from the beginning of the file
+    sample = file_data[:sample_size]
+
+    # Check for null bytes (strong indicator of binary file)
+    if b"\x00" in sample:
+        return False
+
+    # Check for common binary file signatures that we don't support
+    binary_signatures = [
+        b"\x89PNG",  # PNG
+        b"\xff\xd8\xff",  # JPEG
+        b"GIF8",  # GIF
+        b"PK\x03\x04",  # ZIP
+        b"\x50\x4b\x03\x04",  # ZIP variant
+        b"\x1f\x8b",  # GZIP
+        b"BM",  # BMP
+        b"RIFF",  # WAV/AVI
+        b"\x00\x00\x01\x00",  # ICO
+        b"%PDF",  # PDF
+    ]
+
+    for sig in binary_signatures:
+        if sample.startswith(sig):
+            return False
+
+    # Try to decode as text with common encodings
+    try:
+        # Try UTF-8 first
+        sample.decode("utf-8")
+        return True
+    except UnicodeDecodeError:
+        pass
+
+    try:
+        # Try ASCII
+        sample.decode("ascii")
+        return True
+    except UnicodeDecodeError:
+        pass
+
+    try:
+        # Try Latin-1 (covers most single-byte encodings)
+        sample.decode("latin-1")
+
+        # If it decodes as Latin-1, check if it looks like text
+        # Count printable characters vs control characters
+        text = sample.decode("latin-1")
+        printable_chars = sum(1 for c in text if c.isprintable() or c in "\n\r\t")
+        printable_ratio = printable_chars / len(text) if text else 0
+
+        # If more than 80% of characters are printable, consider it text
+        return printable_ratio > 0.8
+
+    except UnicodeDecodeError:
+        return False
 
 
 def validate_file_type(
@@ -60,7 +133,25 @@ def validate_file_type(
     detected_type = detect_file_type_from_magic_bytes(file_data)
 
     if detected_type is None:
-        return False, "Unsupported file type. Only DMG files are allowed."
+        return False, "Unsupported file type. Only DMG and TXT files are allowed."
+
+    # Additional filename validation for text files
+    if detected_type == "txt" and expected_filename:
+        filename_lower = expected_filename.lower()
+        if not (
+            filename_lower.endswith(".txt")
+            or filename_lower.endswith(".log")
+            or filename_lower.endswith(".md")
+            or filename_lower.endswith(".csv")
+            or filename_lower.endswith(".json")
+            or filename_lower.endswith(".xml")
+            or filename_lower.endswith(".yaml")
+            or filename_lower.endswith(".yml")
+        ):
+            return (
+                False,
+                f"File detected as text but filename '{expected_filename}' doesn't have a supported text extension (.txt, .log, .md, .csv, .json, .xml, .yaml, .yml)",
+            )
 
     return True, detected_type
 
@@ -957,7 +1048,7 @@ def download_file(upload_id: str):
         )
 
         # Return decrypted file data
-        from fastapi.responses import Response
+        
 
         return Response(
             content=decrypted_data,
