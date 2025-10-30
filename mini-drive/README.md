@@ -2,6 +2,10 @@
 
 A minimal implementation of chunked file upload system that mimics real-world cloud storage services like Google Drive, Dropbox, and AWS S3 multipart uploads.
 
+## 🎥 Demo Video
+
+**[Watch the complete demonstration on YouTube](https://youtu.be/2n8CdvQ8dyE)** - See all features in action including chunked uploads, encryption, virus scanning, and multi-format support!
+
 ## 🏗️ Architecture
 
 - **Backend**: FastAPI with three main endpoints for chunked upload
