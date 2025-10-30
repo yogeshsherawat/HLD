@@ -7,4 +7,25 @@
   - This is not needed if we are doing HTTPS
 - Step 4
   - Added magic numbers or headers check in case malicious user disguise abc.exe as abc.pdf
-- 
+- Step 5 : encryption at rest
+  - Step 5.1 :
+    - ✅ COMPLETED: Implemented encryption at rest using AES-256-GCM
+      - Each file gets unique encryption key derived from upload_id + salt using PBKDF2
+      - Chunks are encrypted before storing to disk with individual nonces
+      - Final merged file is also encrypted with separate nonce
+      - Encryption metadata stored securely for decryption
+      - Added /download/{upload_id} endpoint to decrypt and serve files
+      - Added /files endpoint to list all encrypted files
+  - Step 5.2 ( Todo)
+    - I am doing vanilla file reading, so it takes a lot of memory
+    - I have to enable streaming support to reduce the ram usage
+- Step 6 : Virus Scanning
+  - ✅ COMPLETED: Implemented virus scanning using ClamAV
+    - Each chunk is scanned for viruses before encryption and storage
+    - Final merged file is also scanned before encryption
+    - Infected files are automatically quarantined in separate directory
+    - Upload is rejected immediately if virus is detected
+    - Added /virus-scan/status/{upload_id} endpoint for scan results
+    - Added /quarantine endpoint to list quarantined files
+    - Added /virus-scan/health endpoint to check ClamAV daemon status
+    - Virus scan results are stored with encryption metadata

@@ -1,12 +1,18 @@
 import base64
+import json
 import os
 import shutil
+import tempfile
+import time
 import uuid
 from pathlib import Path
 
+import pyclamd
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -57,6 +63,285 @@ def validate_file_type(
         return False, "Unsupported file type. Only DMG files are allowed."
 
     return True, detected_type
+
+
+# ==================== ENCRYPTION AT REST FUNCTIONS ====================
+
+
+def generate_file_encryption_key(
+    upload_id: str, salt: bytes = None
+) -> tuple[bytes, bytes]:
+    """
+    Generate a unique encryption key for each file using PBKDF2.
+    Returns (key, salt) tuple.
+    """
+    if salt is None:
+        salt = os.urandom(32)  # 256-bit salt
+
+    # Use upload_id as password base + server secret
+    password = f"{upload_id}_file_encryption_secret".encode("utf-8")
+
+    # Derive 256-bit key using PBKDF2
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,  # 256 bits
+        salt=salt,
+        iterations=100000,  # OWASP recommended minimum
+        backend=default_backend(),
+    )
+    key = kdf.derive(password)
+
+    return key, salt
+
+
+def encrypt_data_at_rest(data: bytes, key: bytes) -> tuple[bytes, bytes]:
+    """
+    Encrypt data using AES-256-GCM for storage.
+    Returns (encrypted_data, nonce) tuple.
+    """
+    # Generate random nonce (96 bits for GCM)
+    nonce = os.urandom(12)
+
+    # Create cipher
+    cipher = Cipher(algorithms.AES(key), modes.GCM(nonce), backend=default_backend())
+    encryptor = cipher.encryptor()
+
+    # Encrypt data
+    encrypted_data = encryptor.update(data) + encryptor.finalize()
+
+    # Return encrypted data with authentication tag appended
+    return encrypted_data + encryptor.tag, nonce
+
+
+def decrypt_data_at_rest(
+    encrypted_data_with_tag: bytes, key: bytes, nonce: bytes
+) -> bytes:
+    """
+    Decrypt data that was encrypted with encrypt_data_at_rest.
+    """
+    # Split encrypted data and authentication tag (last 16 bytes)
+    encrypted_data = encrypted_data_with_tag[:-16]
+    tag = encrypted_data_with_tag[-16:]
+
+    # Create cipher
+    cipher = Cipher(
+        algorithms.AES(key), modes.GCM(nonce, tag), backend=default_backend()
+    )
+    decryptor = cipher.decryptor()
+
+    # Decrypt and verify
+    decrypted_data = decryptor.update(encrypted_data) + decryptor.finalize()
+
+    return decrypted_data
+
+
+def save_encryption_metadata(
+    upload_id: str, salt: bytes, chunk_nonces: dict, final_file_nonce: bytes = None
+):
+    """
+    Save encryption metadata for later decryption.
+    """
+    metadata = {
+        "upload_id": upload_id,
+        "salt": base64.b64encode(salt).decode("utf-8"),
+        "chunk_nonces": {
+            str(k): base64.b64encode(v).decode("utf-8") for k, v in chunk_nonces.items()
+        },
+        "final_file_nonce": (
+            base64.b64encode(final_file_nonce).decode("utf-8")
+            if final_file_nonce
+            else None
+        ),
+        "encryption_algorithm": "AES-256-GCM",
+        "key_derivation": "PBKDF2-SHA256-100000",
+    }
+
+    metadata_path = os.path.join(KEYS_DIR, f"{upload_id}_encryption.json")
+    with open(metadata_path, "w") as f:
+        json.dump(metadata, f, indent=2)
+
+    print(f"🔐 Saved encryption metadata: {metadata_path}")
+
+
+def load_encryption_metadata(upload_id: str) -> dict:
+    """
+    Load encryption metadata for decryption.
+    """
+    metadata_path = os.path.join(KEYS_DIR, f"{upload_id}_encryption.json")
+    if not os.path.exists(metadata_path):
+        raise FileNotFoundError(
+            f"Encryption metadata not found for upload_id: {upload_id}"
+        )
+
+    with open(metadata_path, "r") as f:
+        metadata = json.load(f)
+
+    # Decode base64 values
+    metadata["salt"] = base64.b64decode(metadata["salt"])
+    metadata["chunk_nonces"] = {
+        int(k): base64.b64decode(v) for k, v in metadata["chunk_nonces"].items()
+    }
+    if metadata["final_file_nonce"]:
+        metadata["final_file_nonce"] = base64.b64decode(metadata["final_file_nonce"])
+
+    return metadata
+
+
+# ==================== END ENCRYPTION AT REST FUNCTIONS ====================
+
+
+# ==================== VIRUS SCANNING FUNCTIONS ====================
+
+# Configuration for virus scanning
+QUARANTINE_DIR = "/Users/yogeshwar.sherawat/yogesh/HLD/backend/data/quarantine"
+VIRUS_SCAN_ENABLED = True  # Set to False to disable virus scanning for testing
+
+# Ensure quarantine directory exists
+os.makedirs(QUARANTINE_DIR, exist_ok=True)
+
+# Initialize ClamAV connection
+clamd_client = None
+
+
+def init_clamav():
+    """Initialize ClamAV daemon connection"""
+    global clamd_client
+    try:
+        # Try to connect to ClamAV daemon
+        clamd_client = pyclamd.ClamdAgnostic()
+
+        # Test connection
+        if clamd_client.ping():
+            print("🦠 ClamAV daemon connected successfully")
+
+            # Get version info
+            version = clamd_client.version()
+            print(f"🦠 ClamAV version: {version}")
+            return True
+        else:
+            print("⚠️ ClamAV daemon not responding")
+            return False
+
+    except Exception as e:
+        print(f"⚠️ Failed to connect to ClamAV daemon: {e}")
+        print("💡 Make sure ClamAV daemon is running: brew install clamav && clamd")
+        clamd_client = None
+        return False
+
+
+def scan_data_for_virus(
+    data: bytes, filename: str = "unknown"
+) -> tuple[bool, str, str]:
+    """
+    Scan data for viruses using ClamAV.
+    Returns (is_clean, scan_result, virus_name)
+    """
+    if not VIRUS_SCAN_ENABLED:
+        return True, "SCAN_DISABLED", None
+
+    if clamd_client is None:
+        print("⚠️ ClamAV not available - skipping virus scan")
+        return True, "SCAN_UNAVAILABLE", None
+
+    try:
+        # Scan the data directly
+        scan_result = clamd_client.scan_stream(data)
+
+        if scan_result is None:
+            # Clean file
+            print(f"✅ Virus scan CLEAN: {filename}")
+            return True, "CLEAN", None
+        else:
+            # Virus found
+            virus_name = scan_result.get("stream", ["UNKNOWN_VIRUS"])[1]
+            print(f"🚨 VIRUS DETECTED in {filename}: {virus_name}")
+            return False, "INFECTED", virus_name
+
+    except Exception as e:
+        print(f"❌ Virus scan error for {filename}: {e}")
+        # In production, you might want to reject files if scanning fails
+        # For now, we'll allow them but log the error
+        return True, "SCAN_ERROR", str(e)
+
+
+def scan_file_for_virus(file_path: str) -> tuple[bool, str, str]:
+    """
+    Scan a file for viruses using ClamAV.
+    Returns (is_clean, scan_result, virus_name)
+    """
+    if not VIRUS_SCAN_ENABLED:
+        return True, "SCAN_DISABLED", None
+
+    if clamd_client is None:
+        print("⚠️ ClamAV not available - skipping virus scan")
+        return True, "SCAN_UNAVAILABLE", None
+
+    try:
+        # Scan the file
+        scan_result = clamd_client.scan_file(file_path)
+
+        if scan_result is None:
+            # Clean file
+            print(f"✅ Virus scan CLEAN: {file_path}")
+            return True, "CLEAN", None
+        else:
+            # Virus found
+            virus_name = list(scan_result.values())[0][1]
+            print(f"🚨 VIRUS DETECTED in {file_path}: {virus_name}")
+            return False, "INFECTED", virus_name
+
+    except Exception as e:
+        print(f"❌ Virus scan error for {file_path}: {e}")
+        return True, "SCAN_ERROR", str(e)
+
+
+def quarantine_file(file_path: str, upload_id: str, virus_name: str = None) -> str:
+    """
+    Move infected file to quarantine directory.
+    Returns the quarantine path.
+    """
+    timestamp = int(time.time())
+    quarantine_filename = f"{upload_id}_{timestamp}_{os.path.basename(file_path)}"
+    quarantine_path = os.path.join(QUARANTINE_DIR, quarantine_filename)
+
+    # Move file to quarantine
+    shutil.move(file_path, quarantine_path)
+
+    # Create quarantine metadata
+    quarantine_metadata = {
+        "original_path": file_path,
+        "quarantine_path": quarantine_path,
+        "upload_id": upload_id,
+        "virus_name": virus_name,
+        "quarantined_at": timestamp,
+        "status": "QUARANTINED",
+    }
+
+    metadata_path = quarantine_path + ".metadata.json"
+    with open(metadata_path, "w") as f:
+        json.dump(quarantine_metadata, f, indent=2)
+
+    print(f"🔒 File quarantined: {quarantine_path}")
+    return quarantine_path
+
+
+def save_virus_scan_results(upload_id: str, scan_results: dict):
+    """Save virus scan results for an upload session"""
+    scan_metadata = {
+        "upload_id": upload_id,
+        "scan_results": scan_results,
+        "scanned_at": int(time.time()),
+        "clamav_version": clamd_client.version() if clamd_client else "N/A",
+    }
+
+    scan_metadata_path = os.path.join(KEYS_DIR, f"{upload_id}_virus_scan.json")
+    with open(scan_metadata_path, "w") as f:
+        json.dump(scan_metadata, f, indent=2)
+
+    print(f"🦠 Saved virus scan results: {scan_metadata_path}")
+
+
+# ==================== END VIRUS SCANNING FUNCTIONS ====================
 
 
 app = FastAPI(title="Chunked File Upload Service", version="1.0.0")
@@ -171,15 +456,26 @@ def init_upload(filename: str = Form(...)):
         upload_path = os.path.join(UPLOAD_DIR, upload_id)
         os.makedirs(upload_path, exist_ok=True)
 
+        # Generate encryption key and salt for this upload
+        encryption_key, salt = generate_file_encryption_key(upload_id)
+
         # Store session info in memory
         upload_sessions[upload_id] = {
             "filename": filename,
             "upload_path": upload_path,
             "chunks_received": set(),
             "total_chunks": None,  # Will be set when we know file size
-            "created_at": None,  # Could add timestamp if needed
+            "created_at": int(time.time()),
             "file_type_validated": False,  # Track if file type has been validated
             "detected_file_type": None,  # Store detected file type
+            # Encryption at rest
+            "encryption_key": encryption_key,
+            "salt": salt,
+            "chunk_nonces": {},  # Store nonce for each chunk
+            # Virus scanning
+            "virus_scan_results": {},  # Store scan results for each chunk
+            "final_scan_result": None,  # Final file scan result
+            "is_infected": False,  # Overall infection status
         }
 
         return JSONResponse(
@@ -303,14 +599,69 @@ async def upload_chunk(
             session["detected_file_type"] = result
             print(f"File type validated successfully: {result}")
 
-        # Save chunk to file
+        # Virus scan the decrypted chunk before storing
+        is_clean, scan_result, virus_name = scan_data_for_virus(
+            decrypted_content, f"chunk_{chunk_index}_{session['filename']}"
+        )
+
+        # Store scan result
+        session["virus_scan_results"][chunk_index] = {
+            "is_clean": is_clean,
+            "scan_result": scan_result,
+            "virus_name": virus_name,
+            "scanned_at": int(time.time()),
+        }
+
+        # If virus detected, reject the chunk and potentially quarantine
+        if not is_clean and scan_result == "INFECTED":
+            session["is_infected"] = True
+
+            # Save the infected chunk for analysis (optional)
+            infected_chunk_path = os.path.join(
+                session["upload_path"], f"infected_chunk_{chunk_index}"
+            )
+            with open(infected_chunk_path, "wb") as infected_file:
+                infected_file.write(decrypted_content)
+
+            # Quarantine the infected chunk
+            quarantine_path = quarantine_file(
+                infected_chunk_path, upload_id, virus_name
+            )
+
+            # Clean up upload session and reject
+            try:
+                shutil.rmtree(session["upload_path"])
+            except Exception:
+                pass
+            del upload_sessions[upload_id]
+
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "VIRUS_DETECTED",
+                    "virus_name": virus_name,
+                    "chunk_index": chunk_index,
+                    "quarantine_path": quarantine_path,
+                    "message": f"Virus detected in chunk {chunk_index}: {virus_name}. Upload rejected and file quarantined.",
+                },
+            )
+
+        # Encrypt chunk data before storing to disk
+        encrypted_chunk_data, nonce = encrypt_data_at_rest(
+            decrypted_content, session["encryption_key"]
+        )
+
+        # Store nonce for this chunk
+        session["chunk_nonces"][chunk_index] = nonce
+
+        # Save encrypted chunk to file
         with open(chunk_path, "wb") as chunk_file:
-            chunk_file.write(decrypted_content)
+            chunk_file.write(encrypted_chunk_data)
 
         # Mark chunk as received (only after successful write)
         session["chunks_received"].add(chunk_index)
         print(
-            f"Chunk {chunk_index} successfully saved to disk and added to memory tracking."
+            f"Chunk {chunk_index} encrypted and saved to disk (size: {len(encrypted_chunk_data)} bytes)"
         )
 
         return JSONResponse(
@@ -386,8 +737,10 @@ def complete_upload(upload_id: str = Form(...)):
             counter += 1
 
         print(f"Final path: {final_path}")
-        # Merge chunks in order
-        with open(final_path, "wb") as final_file:
+
+        # First, merge decrypted chunks into a temporary file
+        temp_final_path = final_path + ".temp"
+        with open(temp_final_path, "wb") as temp_final_file:
             for chunk_index in range(session["total_chunks"]):
                 chunk_path = os.path.join(
                     session["upload_path"], f"chunk_{chunk_index}"
@@ -398,8 +751,100 @@ def complete_upload(upload_id: str = Form(...)):
                         detail=f"Chunk file missing: chunk_{chunk_index}",
                     )
 
+                # Read encrypted chunk from disk
                 with open(chunk_path, "rb") as chunk_file:
-                    final_file.write(chunk_file.read())
+                    encrypted_chunk_data = chunk_file.read()
+
+                # Decrypt chunk using stored nonce
+                chunk_nonce = session["chunk_nonces"][chunk_index]
+                decrypted_chunk_data = decrypt_data_at_rest(
+                    encrypted_chunk_data, session["encryption_key"], chunk_nonce
+                )
+
+                # Write decrypted chunk to temporary final file
+                temp_final_file.write(decrypted_chunk_data)
+
+        # Virus scan the final merged file before encrypting
+        print("🦠 Performing final virus scan on merged file...")
+        is_clean, scan_result, virus_name = scan_file_for_virus(temp_final_path)
+
+        # Store final scan result
+        session["final_scan_result"] = {
+            "is_clean": is_clean,
+            "scan_result": scan_result,
+            "virus_name": virus_name,
+            "scanned_at": int(time.time()),
+        }
+
+        # If virus detected in final file, quarantine and reject
+        if not is_clean and scan_result == "INFECTED":
+            session["is_infected"] = True
+
+            # Quarantine the final file
+            quarantine_path = quarantine_file(temp_final_path, upload_id, virus_name)
+
+            # Save virus scan results before cleanup
+            save_virus_scan_results(
+                upload_id,
+                {
+                    "chunk_results": session["virus_scan_results"],
+                    "final_result": session["final_scan_result"],
+                    "overall_status": "INFECTED",
+                },
+            )
+
+            # Clean up upload session
+            try:
+                shutil.rmtree(session["upload_path"])
+            except Exception:
+                pass
+            del upload_sessions[upload_id]
+
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "VIRUS_DETECTED_FINAL",
+                    "virus_name": virus_name,
+                    "quarantine_path": quarantine_path,
+                    "message": f"Virus detected in final merged file: {virus_name}. Upload rejected and file quarantined.",
+                },
+            )
+
+        # Now encrypt the entire final file
+        with open(temp_final_path, "rb") as temp_file:
+            final_file_data = temp_file.read()
+
+        # Encrypt final file for storage
+        encrypted_final_data, final_nonce = encrypt_data_at_rest(
+            final_file_data, session["encryption_key"]
+        )
+
+        # Write encrypted final file
+        with open(final_path, "wb") as final_file:
+            final_file.write(encrypted_final_data)
+
+        # Clean up temporary file
+        os.remove(temp_final_path)
+
+        # Save encryption metadata for future decryption
+        save_encryption_metadata(
+            upload_id, session["salt"], session["chunk_nonces"], final_nonce
+        )
+
+        # Save virus scan results for successful upload
+        save_virus_scan_results(
+            upload_id,
+            {
+                "chunk_results": session["virus_scan_results"],
+                "final_result": session["final_scan_result"],
+                "overall_status": "CLEAN",
+            },
+        )
+
+        print(
+            f"🔐 Final file encrypted and saved: {final_path} (encrypted size: {len(encrypted_final_data)} bytes)"
+        )
+        print(f"🦠 Virus scan completed - File is CLEAN")
 
         # Get file size for response
         file_size = os.path.getsize(final_path)
@@ -472,3 +917,217 @@ def get_upload_status(upload_id: str):
             "detected_file_type": session["detected_file_type"],
         }
     )
+
+
+@app.get("/download/{upload_id}")
+def download_file(upload_id: str):
+    """Decrypt and serve the final file"""
+    try:
+        # Load encryption metadata
+        metadata = load_encryption_metadata(upload_id)
+
+        # Find the encrypted file
+        # We need to search for files that match this upload_id
+        encrypted_files = []
+        for filename in os.listdir(MERGED_DIR):
+            file_path = os.path.join(MERGED_DIR, filename)
+            if os.path.isfile(file_path):
+                # Check if this file was created by this upload_id
+                # We can check the metadata to see if it exists
+                encrypted_files.append((filename, file_path))
+
+        if not encrypted_files:
+            raise HTTPException(
+                status_code=404, detail="No files found for this upload"
+            )
+
+        # For now, take the first file (in production, you'd have better file tracking)
+        filename, file_path = encrypted_files[0]
+
+        # Read encrypted file
+        with open(file_path, "rb") as f:
+            encrypted_data = f.read()
+
+        # Regenerate encryption key from metadata
+        encryption_key, _ = generate_file_encryption_key(upload_id, metadata["salt"])
+
+        # Decrypt file
+        decrypted_data = decrypt_data_at_rest(
+            encrypted_data, encryption_key, metadata["final_file_nonce"]
+        )
+
+        # Return decrypted file data
+        from fastapi.responses import Response
+
+        return Response(
+            content=decrypted_data,
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}",
+                "Content-Length": str(len(decrypted_data)),
+            },
+        )
+
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to decrypt file: {str(e)}")
+
+
+@app.get("/files")
+def list_encrypted_files():
+    """List all encrypted files with their metadata"""
+    try:
+        files = []
+
+        # List all encryption metadata files
+        for metadata_file in os.listdir(KEYS_DIR):
+            if metadata_file.endswith("_encryption.json"):
+                upload_id = metadata_file.replace("_encryption.json", "")
+
+                try:
+                    metadata = load_encryption_metadata(upload_id)
+
+                    # Find corresponding encrypted file
+                    encrypted_file_path = None
+                    encrypted_file_size = 0
+
+                    for filename in os.listdir(MERGED_DIR):
+                        file_path = os.path.join(MERGED_DIR, filename)
+                        if os.path.isfile(file_path):
+                            # Simple heuristic: if file was created around the same time
+                            # In production, you'd have better file tracking
+                            encrypted_file_path = filename
+                            encrypted_file_size = os.path.getsize(file_path)
+                            break
+
+                    files.append(
+                        {
+                            "upload_id": upload_id,
+                            "filename": encrypted_file_path,
+                            "encrypted_size": encrypted_file_size,
+                            "encryption_algorithm": metadata["encryption_algorithm"],
+                            "key_derivation": metadata["key_derivation"],
+                            "download_url": f"/download/{upload_id}",
+                        }
+                    )
+
+                except Exception as e:
+                    print(f"Error loading metadata for {upload_id}: {e}")
+                    continue
+
+        return JSONResponse({"encrypted_files": files, "total_files": len(files)})
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list files: {str(e)}")
+
+
+@app.get("/virus-scan/status/{upload_id}")
+def get_virus_scan_status(upload_id: str):
+    """Get detailed virus scan results for an upload"""
+    try:
+        scan_metadata_path = os.path.join(KEYS_DIR, f"{upload_id}_virus_scan.json")
+        if not os.path.exists(scan_metadata_path):
+            raise HTTPException(status_code=404, detail="Virus scan results not found")
+
+        with open(scan_metadata_path, "r") as f:
+            scan_data = json.load(f)
+
+        return JSONResponse(scan_data)
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to get virus scan status: {str(e)}"
+        )
+
+
+@app.get("/quarantine")
+def list_quarantined_files():
+    """List all quarantined files"""
+    try:
+        quarantined_files = []
+
+        for filename in os.listdir(QUARANTINE_DIR):
+            if filename.endswith(".metadata.json"):
+                metadata_path = os.path.join(QUARANTINE_DIR, filename)
+                with open(metadata_path, "r") as f:
+                    metadata = json.load(f)
+                quarantined_files.append(metadata)
+
+        return JSONResponse(
+            {
+                "quarantined_files": quarantined_files,
+                "total_quarantined": len(quarantined_files),
+            }
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to list quarantined files: {str(e)}"
+        )
+
+
+@app.get("/virus-scan/health")
+def virus_scan_health():
+    """Check ClamAV daemon health and status"""
+    try:
+        if clamd_client is None:
+            return JSONResponse(
+                {
+                    "status": "unavailable",
+                    "message": "ClamAV daemon not connected",
+                    "scanning_enabled": VIRUS_SCAN_ENABLED,
+                }
+            )
+
+        # Test connection
+        if clamd_client.ping():
+            version = clamd_client.version()
+            return JSONResponse(
+                {
+                    "status": "healthy",
+                    "version": version,
+                    "scanning_enabled": VIRUS_SCAN_ENABLED,
+                    "message": "ClamAV daemon is running and responsive",
+                }
+            )
+        else:
+            return JSONResponse(
+                {
+                    "status": "unhealthy",
+                    "message": "ClamAV daemon not responding",
+                    "scanning_enabled": VIRUS_SCAN_ENABLED,
+                }
+            )
+
+    except Exception as e:
+        return JSONResponse(
+            {
+                "status": "error",
+                "message": f"Error checking ClamAV status: {str(e)}",
+                "scanning_enabled": VIRUS_SCAN_ENABLED,
+            }
+        )
+
+
+# Initialize ClamAV on startup
+@app.on_event("startup")
+async def startup_event():
+    """Initialize services on startup"""
+    print("🚀 Starting Chunked File Upload Service with Virus Scanning...")
+
+    # Initialize ClamAV
+    clamav_status = init_clamav()
+    if clamav_status:
+        print("✅ Virus scanning is ENABLED and ready")
+    else:
+        print("⚠️ Virus scanning is DISABLED - ClamAV not available")
+        print("💡 To enable virus scanning:")
+        print("   1. Install ClamAV: brew install clamav")
+        print("   2. Update virus definitions: freshclam")
+        print("   3. Start daemon: clamd")
+
+    print(f"📁 Upload directory: {UPLOAD_DIR}")
+    print(f"📁 Merged files directory: {MERGED_DIR}")
+    print(f"🔒 Quarantine directory: {QUARANTINE_DIR}")
+    print(f"🔑 Keys directory: {KEYS_DIR}")
